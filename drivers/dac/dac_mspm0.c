@@ -10,6 +10,7 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/dac.h>
+#include <zephyr/irq.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/util.h>
 
@@ -126,6 +127,29 @@ BUILD_ASSERT(offsetof(struct dac12_regs, DATA0) == 0x1200U);
 #define DAC12_CTL1_OPS_MASK        0x01000000U /* bit 24: output pin select */
 #define DAC12_CTL1_OPS_OUT0        0x01000000U /* route output to DAC_OUT pin */
 
+/* CTL2 — FIFO control */
+#define DAC12_CTL2_FIFOEN_SET       0x00000001U /* FIFO enabled */
+#define DAC12_CTL2_FIFOTRIGSEL_STIM 0x00000000U /* sample time generator trigger */
+#define DAC12_CTL2_FIFOTH_MED       0x00000100U /* half of FIFO locations empty */
+
+/* CTL3 — sample time generator */
+#define DAC12_CTL3_STIMEN_SET          0x00000001U /* sample time generator enabled */
+#define DAC12_CTL3_STIMCONFIG_MASK     0x00000F00U
+#define DAC12_CTL3_STIMCONFIG__500SPS  0x00000000U
+#define DAC12_CTL3_STIMCONFIG__1KSPS   0x00000100U
+#define DAC12_CTL3_STIMCONFIG__2KSPS   0x00000200U
+#define DAC12_CTL3_STIMCONFIG__4KSPS   0x00000300U
+#define DAC12_CTL3_STIMCONFIG__8KSPS   0x00000400U
+#define DAC12_CTL3_STIMCONFIG__16KSPS  0x00000500U
+#define DAC12_CTL3_STIMCONFIG__100KSPS 0x00000600U
+#define DAC12_CTL3_STIMCONFIG__200KSPS 0x00000700U
+#define DAC12_CTL3_STIMCONFIG__500KSPS 0x00000800U
+#define DAC12_CTL3_STIMCONFIG__1MSPS   0x00000900U
+
+/* CPU_INT — FIFO half-empty interrupt mask and clear */
+#define DAC12_CPU_INT_IMASK_FIFO1B2IFG_SET 0x00000400U
+#define DAC12_CPU_INT_ICLR_FIFO1B2IFG_CLR  0x00000400U
+
 /* CALCTL — self-calibration trigger and trim source select */
 #define DAC12_CALCTL_CALON_ACTIVE               0x00000001U /* bit 0: calibration running */
 #define DAC12_CALCTL_CALSEL_SELFCALIBRATIONTRIM 0x00000002U /* bit 1: use self-cal trim */
@@ -145,6 +169,7 @@ BUILD_ASSERT(offsetof(struct dac12_regs, DATA0) == 0x1200U);
 
 #define DAC_PRIMARY_CHANNEL_ID 0
 #define DAC_READY_TIMEOUT_US   1000
+#define DAC_FIFO_DEPTH         4
 
 #define DAC12_VREF_SOURCE_VEREFP_VEREFN (DAC12_CTL1_REFSP_VEREFP | DAC12_CTL1_REFSN_VEREFN)
 #define DAC12_VREF_SOURCE_VDDA_VSSA     (DAC12_CTL1_REFSP_VDDA | DAC12_CTL1_REFSN_VSSA)
@@ -152,12 +177,28 @@ BUILD_ASSERT(offsetof(struct dac12_regs, DATA0) == 0x1200U);
 struct dac_mspm0_config {
 	struct dac12_regs *base;
 	uint32_t vref_ctl1_bits;
+	bool fifo_enabled;
+	uint32_t sample_rate_hz;
 };
 
 struct dac_mspm0_data {
 	struct k_mutex lock;
 	uint8_t resolution;
+	uint32_t last_value;
 };
+
+static void dac_mspm0_isr(const struct device *dev)
+{
+	const struct dac_mspm0_config *config = dev->config;
+	struct dac_mspm0_data *data = dev->data;
+	struct dac12_regs *regs = config->base;
+
+	/* refill the two slots that just drained */
+	regs->DATA0 = data->last_value;
+	regs->DATA0 = data->last_value;
+
+	regs->CPU_INT.ICLR = DAC12_CPU_INT_ICLR_FIFO1B2IFG_CLR;
+}
 
 static int dac_mspm0_channel_setup(const struct device *dev,
 				   const struct dac_channel_cfg *channel_cfg)
@@ -219,6 +260,62 @@ static int dac_mspm0_channel_setup(const struct device *dev,
 		}
 	}
 
+	if (config->fifo_enabled) {
+		uint32_t stimconfig;
+
+		switch (config->sample_rate_hz) {
+		case 500:
+			stimconfig = DAC12_CTL3_STIMCONFIG__500SPS;
+			break;
+		case 1000:
+			stimconfig = DAC12_CTL3_STIMCONFIG__1KSPS;
+			break;
+		case 2000:
+			stimconfig = DAC12_CTL3_STIMCONFIG__2KSPS;
+			break;
+		case 4000:
+			stimconfig = DAC12_CTL3_STIMCONFIG__4KSPS;
+			break;
+		case 8000:
+			stimconfig = DAC12_CTL3_STIMCONFIG__8KSPS;
+			break;
+		case 16000:
+			stimconfig = DAC12_CTL3_STIMCONFIG__16KSPS;
+			break;
+		case 100000:
+			stimconfig = DAC12_CTL3_STIMCONFIG__100KSPS;
+			break;
+		case 200000:
+			stimconfig = DAC12_CTL3_STIMCONFIG__200KSPS;
+			break;
+		case 500000:
+			stimconfig = DAC12_CTL3_STIMCONFIG__500KSPS;
+			break;
+		case 1000000:
+			stimconfig = DAC12_CTL3_STIMCONFIG__1MSPS;
+			break;
+		default:
+			k_mutex_unlock(&data->lock);
+			return -EINVAL;
+		}
+
+		/* enable sample time generator with selected rate */
+		regs->CTL3 = DAC12_CTL3_STIMEN_SET | stimconfig;
+
+		/* enable FIFO, select sample time generator trigger, half-empty threshold */
+		regs->CTL2 = DAC12_CTL2_FIFOEN_SET |
+			     DAC12_CTL2_FIFOTRIGSEL_STIM |
+			     DAC12_CTL2_FIFOTH_MED;
+
+		/* pre-fill all slots so output begins on the first trigger tick */
+		for (int i = 0; i < DAC_FIFO_DEPTH; i++) {
+			regs->DATA0 = data->last_value;
+		}
+
+		/* unmask FIFO half-empty interrupt */
+		regs->CPU_INT.IMASK |= DAC12_CPU_INT_IMASK_FIFO1B2IFG_SET;
+	}
+
 	k_mutex_unlock(&data->lock);
 
 	return 0;
@@ -253,6 +350,14 @@ static int dac_mspm0_write_value(const struct device *dev, uint8_t channel, uint
 		regs->DATA0 = (uint8_t)value;
 	}
 
+	/*
+	 * Track the last written value so the FIFO half-empty ISR can hold the
+	 * current step steady while the application sleeps between writes.
+	 */
+	if (config->fifo_enabled) {
+		data->last_value = value;
+	}
+
 unlock:
 	k_mutex_unlock(&data->lock);
 	return ret;
@@ -275,20 +380,35 @@ static DEVICE_API(dac, dac_mspm0_driver_api) = {
 	.write_value   = dac_mspm0_write_value
 };
 
+#define DAC_MSPM0_IRQ_INIT(id)							\
+	IRQ_CONNECT(DT_INST_IRQN(id), DT_INST_IRQ(id, priority),		\
+		    dac_mspm0_isr, DEVICE_DT_INST_GET(id), 0);			\
+	irq_enable(DT_INST_IRQN(id));
+
 #define DAC_MSPM0_DEFINE(id)									\
 												\
 	static const struct dac_mspm0_config dac_mspm0_config_##id = {				\
 		.base = (struct dac12_regs *)DT_INST_REG_ADDR(id),				\
 		.vref_ctl1_bits = COND_CODE_1(DT_INST_NODE_HAS_PROP(id, vref),			\
-			DAC12_VREF_SOURCE_VEREFP_VEREFN,					\
-			DAC12_VREF_SOURCE_VDDA_VSSA),						\
+			(DAC12_VREF_SOURCE_VEREFP_VEREFN),					\
+			(DAC12_VREF_SOURCE_VDDA_VSSA)),						\
+			 .fifo_enabled = DT_INST_PROP(id, fifo_enable),				\
+			 .sample_rate_hz = DT_INST_PROP_OR(id, sample_rate_hz, 0),		\
 	};											\
 												\
 	static struct dac_mspm0_data dac_mspm0_data_##id = {					\
 		.lock = Z_MUTEX_INITIALIZER(dac_mspm0_data_##id.lock),				\
 	};											\
 												\
-	DEVICE_DT_INST_DEFINE(id, &dac_mspm0_init, NULL, &dac_mspm0_data_##id,			\
+	static int dac_mspm0_init_##id(const struct device *dev)				\
+	{											\
+		dac_mspm0_init(dev);								\
+		IF_ENABLED(DT_INST_PROP(id, fifo_enable),					\
+			   (DAC_MSPM0_IRQ_INIT(id)));						\
+		return 0;									\
+	}											\
+												\
+	DEVICE_DT_INST_DEFINE(id, &dac_mspm0_init_##id, NULL, &dac_mspm0_data_##id,		\
 			      &dac_mspm0_config_##id, POST_KERNEL, CONFIG_DAC_INIT_PRIORITY,	\
 			      &dac_mspm0_driver_api);
 
