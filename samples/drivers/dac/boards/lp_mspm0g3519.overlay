@@ -21,3 +21,12 @@
 		dac-resolution = <12>;
 	};
 };
+
+&mfpclk {
+	status = "okay";
+};
+
+&dac0 {
+	fifo-enable;
+	sample-rate-hz = <1000>;
+};
