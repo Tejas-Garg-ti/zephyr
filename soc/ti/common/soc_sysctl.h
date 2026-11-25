@@ -43,8 +43,12 @@
 #define SYSCTL_EXLFCTL_OFFSET        0x1318 /**< LFCLK_IN control */
 
 #if defined(CONFIG_SOC_SERIES_AM13E)
-#define SYSCTL_XTALCR_OFFSET      0x1474 /**< XTAL control */
-#define SYSCTL_X1CNT_OFFSET       0x147C /**< X1 oscillator activity counter */
+#define SYSCTL_PWREN_MCPERIPH_OFFSET         0x1424 /**< MCPERIPH Power Enable */
+#define SYSCTL_RSTCTL_ASSERT_MCPERIPH_OFFSET 0x1424 /**< MCPERIPH Reset Assertion */
+#define SYSCTL_RSTCTL_CLEAR_MCPERIPH_OFFSET  0x1424 /**< MCPERIPH Reset De-Assertion */
+#define SYSCTL_XTALCR_OFFSET                 0x1474 /**< XTAL control */
+#define SYSCTL_X1CNT_OFFSET                  0x147C /**< X1 oscillator activity counter */
+#define SYSCTL_CMPSSCTL_OFFSET               0x1480 /**< CMPSS control (low DAC output enables) */
 /*
  * AM13SPARESOCLOCK2: bit 0 selects SRAM3 bus path.
  * Reset = 1 (C-AHB alias at 0x00C18000).
@@ -137,6 +141,13 @@
 #define SYSCTL_X1CNT_CLR       BIT(16)
 #define SYSCTL_X1CNT_CNT       GENMASK(10, 0)
 #define SYSCTL_X1CNT_SATURATED (0x7FFU)
+
+/* cmpssctl bits (AM13E): bit 0 = CMP2LDACOUTEN, bit 1 = CMP3LDACOUTEN */
+#if defined(CONFIG_SOC_SERIES_AM13E)
+#define SYSCTL_PWREN_MCPERIPH_KEY_UNLOCK  (0x26000000)
+#define SYSCTL_RSTCTL_MCPERIPH_KEY_UNLOCK (0xB1000000)
+#define SYSCTL_CMPSSCTL_CMPSSCTLEN        BIT(31)
+#endif
 
 /* hfclkclkcfg bits */
 #define SYSCTL_HFCLKCLKCFG_HFCLKFLTCHK        BIT(28)
