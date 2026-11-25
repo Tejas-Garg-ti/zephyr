@@ -56,6 +56,12 @@
 			label = "Red LED";
 		};
 	};
+
+	zephyr,user {
+		dac = <&dac0>;
+		dac-channel-id = <0>;
+		dac-resolution = <12>;
+	};
 };
 
 &gpioa {
@@ -168,4 +174,12 @@
 	/* PB4 (GPIO36) -> INPUTXBAR1 -> ECAP1 ECCTL0.INPUTSEL (raw=1) */
 	mux-states = <&xbar1 0 AM13E2_XBAR_IN_STATE(36, 1)>;
 	mux-state-names = "input";
+};
+
+&dac0 {
+	status = "okay";
+};
+
+&dac1 {
+	status = "okay";
 };

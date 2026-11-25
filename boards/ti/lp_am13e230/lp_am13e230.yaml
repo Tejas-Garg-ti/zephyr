@@ -11,6 +11,7 @@ supported:
   - can
   - counter
   - crc
+  - dac
   - gpio
   - i2c
   - mux
